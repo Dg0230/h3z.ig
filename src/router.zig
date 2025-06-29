@@ -473,11 +473,11 @@ test "router basic functionality" {
         }
     };
 
-    try router.get('/', TestHandler.handle);
+    try router.get("/", TestHandler.handle);
 
     var request = @import("http/request.zig").Request.init(allocator);
     request.method = .GET;
-    request.uri.path = '/';
+    request.uri.path = .{ .raw = "/" };
     defer request.deinit();
 
     var ctx = Context.init(allocator, request);

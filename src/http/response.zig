@@ -317,9 +317,9 @@ test "response builder" {
     var response = Response.init(allocator);
     defer response.deinit();
 
-    _ = try response.setStatus(.created)
-        .setHeader("X-Custom", "test")
-        .json(.{ .message = "success", .id = 123 });
+    _ = response.setStatus(.created);
+    _ = try response.setHeader("X-Custom", "test");
+    _ = try response.json(.{ .message = "success", .id = 123 });
 
     try testing.expect(response.status == .created);
     try testing.expectEqualStrings("test", response.getHeader("X-Custom").?);

@@ -377,7 +377,11 @@ test "request parsing" {
     defer request.deinit();
 
     try testing.expect(request.method == .GET);
-    try testing.expectEqualStrings("/api/users?page=1", request.uri.path);
+    const path_str = switch (request.uri.path) {
+        .raw => |raw| raw,
+        .percent_encoded => |encoded| encoded,
+    };
+    try testing.expectEqualStrings("/api/users", path_str);
     try testing.expect(request.version == .@"1.1");
     try testing.expectEqualStrings("example.com", request.header("Host").?);
     try testing.expectEqualStrings("{\"name\":\"test\"}", request.body.?);

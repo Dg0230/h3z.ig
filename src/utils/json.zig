@@ -32,7 +32,7 @@ pub fn prettyStringify(value: anytype, allocator: std.mem.Allocator) ![]u8 {
 
 /// Validate JSON string
 pub fn validate(json_str: []const u8) bool {
-    var stream = std.json.Scanner.init(json_str);
+    var stream = std.json.Scanner.initCompleteInput(std.heap.page_allocator, json_str);
     while (true) {
         const token = stream.next() catch return false;
         if (token == .end_of_document) break;
