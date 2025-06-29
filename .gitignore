@@ -1,0 +1,64 @@
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Runtime files
+*.pid
+*.tmp
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Coverage reports
+*.gcov
+*.gcda
+*.gcno
+
+# Testing artifacts
+test-results/
+coverage/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Documentation build
+docs/generated/
+
+# Package manager files
+node_modules/
+package-lock.json
+yarn.lock
+
+# Example artifacts
+examples/public/uploads/
+examples/logs/
+
+# Benchmark results
+benchmarks/results/
+*.bench
+
+# Temporary files
+tmp/
+temp/
