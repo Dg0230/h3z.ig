@@ -77,7 +77,7 @@ pub fn build(b: *std.Build) void {
 
     // Benchmarks
     const benchmark_exe = b.addExecutable(.{
-        .name = "h3z_benchmark",
+        .name = "basic_benchmark",
         .root_source_file = b.path("benchmarks/basic_benchmark.zig"),
         .target = target,
         .optimize = .ReleaseFast,

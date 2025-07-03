@@ -1,4 +1,5 @@
 const std = @import("std");
+const headers = @import("headers.zig");
 
 /// HTTP methods
 pub const HttpMethod = enum {
@@ -67,9 +68,10 @@ pub const Request = struct {
     method: HttpMethod,
     uri: std.Uri,
     version: HttpVersion,
-    headers: Headers,
+    headers: headers.Headers,
     body: ?[]const u8,
     allocator: std.mem.Allocator,
+    _allocated_uri: ?[]const u8 = null, // Store the allocated URI string if any
 
     /// Initialize a new request
     pub fn init(allocator: std.mem.Allocator) Request {
@@ -86,7 +88,7 @@ pub const Request = struct {
                 .fragment = null,
             },
             .version = .@"1.1",
-            .headers = Headers.init(allocator),
+            .headers = headers.Headers.init(allocator),
             .body = null,
             .allocator = allocator,
         };
@@ -98,24 +100,35 @@ pub const Request = struct {
         if (self.body) |body| {
             self.allocator.free(body);
         }
+        if (self._allocated_uri) |uri| {
+            self.allocator.free(uri);
+        }
+    }
+
+    /// Remove a header (case-insensitive)
+    pub fn removeHeader(self: *Request, name: []const u8) void {
+        self.headers.remove(name);
+    }
+
+    /// Set a header (replaces any existing values)
+    pub fn setHeader(self: *Request, name: []const u8, value: []const u8) !void {
+        try self.headers.set(name, value);
+    }
+
+    /// Add a header (appends to existing values)
+    pub fn addHeader(self: *Request, name: []const u8, value: []const u8) !void {
+        try self.headers.addBorrowed(name, value);
     }
 
     /// Get header value by name (case-insensitive)
     pub fn header(self: *const Request, name: []const u8) ?[]const u8 {
-        // First try exact match
-        if (self.headers.get(name)) |value| {
-            return value;
-        }
+        return self.headers.get(name);
+    }
 
-        // Then try case-insensitive search
-        var iterator = self.headers.iterator();
-        while (iterator.next()) |entry| {
-            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) {
-                return entry.value_ptr.*;
-            }
-        }
-
-        return null;
+    /// Get all header values by name (case-insensitive)
+    /// Caller must free the returned slice with allocator.free()
+    pub fn getAllHeaders(self: *const Request, name: []const u8) ![]const []const u8 {
+        return self.headers.getAll(name);
     }
 
     /// Get Content-Type header
@@ -271,6 +284,11 @@ pub fn parseRequest(allocator: std.mem.Allocator, data: []const u8) ParseError!R
     else
         try std.fmt.allocPrint(allocator, "http://localhost{s}", .{uri_str});
 
+    // Store the allocated URI string if we created one
+    if (full_uri.ptr != uri_str.ptr) {
+        request._allocated_uri = full_uri;
+    }
+
     request.uri = std.Uri.parse(full_uri) catch |err| {
         // If we allocated memory for full_uri, free it
         if (!std.mem.startsWith(u8, uri_str, "http://") and !std.mem.startsWith(u8, uri_str, "https://")) {
@@ -313,10 +331,7 @@ pub fn parseRequest(allocator: std.mem.Allocator, data: []const u8) ParseError!R
         const name = std.mem.trim(u8, trimmed[0..colon_pos], " ");
         const value = std.mem.trim(u8, trimmed[colon_pos + 1 ..], " ");
 
-        const name_copy = try allocator.dupe(u8, name);
-        const value_copy = try allocator.dupe(u8, value);
-
-        try request.headers.put(name_copy, value_copy);
+        try request.headers.set(name, value);
     }
 
     // Handle body
@@ -350,15 +365,31 @@ test "request header access" {
     var request = Request.init(allocator);
     defer request.deinit();
 
-    try request.headers.put("Content-Type", "application/json");
-    try request.headers.put("User-Agent", "H3Z/1.0");
-
-    try testing.expectEqualStrings("application/json", request.contentType().?);
-    try testing.expectEqualStrings("H3Z/1.0", request.userAgent().?);
-
-    // Case-insensitive access
+    // Test setting and getting headers
+    try request.setHeader("Content-Type", "application/json");
     try testing.expectEqualStrings("application/json", request.header("content-type").?);
-    try testing.expectEqualStrings("H3Z/1.0", request.header("user-agent").?);
+    try testing.expectEqualStrings("application/json", request.header("Content-Type").?);
+
+    // Test multiple values for same header
+    try request.addHeader("X-Test", "value1");
+    try request.addHeader("x-test", "value2");
+
+    // Should return the first value
+    try testing.expectEqualStrings("value1", request.header("X-Test").?);
+
+    // Test getting all values
+    const values = try request.getAllHeaders("x-test");
+    defer allocator.free(values);
+    try testing.expectEqual(@as(usize, 2), values.len);
+    try testing.expectEqualStrings("value1", values[0]);
+    try testing.expectEqualStrings("value2", values[1]);
+
+    // Test removing header
+    request.removeHeader("content-type");
+    try testing.expect(request.header("content-type") == null);
+
+    // Test non-existent header
+    try testing.expect(request.header("non-existent") == null);
 }
 
 test "request parsing" {

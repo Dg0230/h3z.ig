@@ -1,6 +1,13 @@
 const std = @import("std");
 const h3z = @import("h3z");
 
+// Log alias for easy replacement of logging implementation
+const log = struct {
+    pub fn info(comptime format: []const u8, args: anytype) void {
+        std.debug.print(format, args);
+    }
+};
+
 const BenchmarkConfig = struct {
     num_requests: u32 = 10000,
     concurrency: u32 = 100,
@@ -22,8 +29,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    std.log.info("Starting H3Z Benchmarks", .{});
-    std.log.info("======================", .{});
+    log.info("Starting H3Z Benchmarks\n", .{});
+    log.info("======================\n", .{});
 
     const config = BenchmarkConfig{
         .num_requests = 50000,
@@ -33,32 +40,32 @@ pub fn main() !void {
 
     // JSON Response Benchmark
     {
-        std.log.info("\n1. JSON Response Benchmark", .{});
+        log.info("\n1. JSON Response Benchmark\n", .{});
         const result = try benchmarkJsonResponse(allocator, config);
         printBenchmarkResult("JSON Response", result);
     }
 
     // Route Parameter Benchmark
     {
-        std.log.info("\n2. Route Parameter Benchmark", .{});
+        log.info("\n2. Route Parameter Benchmark\n", .{});
         const result = try benchmarkRouteParams(allocator, config);
         printBenchmarkResult("Route Parameters", result);
     }
 
     // Middleware Stack Benchmark
     {
-        std.log.info("\n3. Middleware Stack Benchmark", .{});
+        log.info("\n3. Middleware Stack Benchmark\n", .{});
         const result = try benchmarkMiddleware(allocator, config);
         printBenchmarkResult("Middleware Stack", result);
     }
 
     // Memory Allocation Benchmark
     {
-        std.log.info("\n4. Memory Usage Benchmark", .{});
+        log.info("\n4. Memory Usage Benchmark\n", .{});
         try benchmarkMemoryUsage(allocator, config);
     }
 
-    std.log.info("\nBenchmarks completed!", .{});
+    log.info("\nBenchmarks completed!\n", .{});
 }
 
 fn benchmarkJsonResponse(allocator: std.mem.Allocator, config: BenchmarkConfig) !BenchmarkResult {
@@ -134,10 +141,10 @@ fn benchmarkMiddleware(allocator: std.mem.Allocator, config: BenchmarkConfig) !B
 fn createBenchmarkMiddleware() h3z.Middleware {
     return h3z.Middleware{
         .handler = struct {
-            fn handle(ctx: *h3z.Context, next: h3z.NextFn) !void {
+            fn handle(ctx: *h3z.Context) !h3z.MiddlewareResult {
                 // Simulate some middleware work
                 try ctx.setLocal("benchmark", "middleware");
-                try next(ctx);
+                return .continue_chain;
             }
         }.handle,
     };
@@ -154,14 +161,14 @@ fn benchmarkApp(
     defer latencies.deinit();
 
     // Warmup
-    std.log.info("Warming up with {} requests...", .{config.warmup_requests});
+    log.info("Warming up with {d} requests...\n", .{config.warmup_requests});
     var i: u32 = 0;
     while (i < config.warmup_requests) : (i += 1) {
         var response = try app.testRequest(method, path, body);
         response.deinit();
     }
 
-    std.log.info("Running {} requests...", .{config.num_requests});
+    log.info("Running {d} requests...\n", .{config.num_requests});
 
     const start_time = std.time.nanoTimestamp();
 
@@ -177,7 +184,7 @@ fn benchmarkApp(
         try latencies.append(latency_ms);
 
         if (i % 10000 == 0 and i > 0) {
-            std.log.info("Completed {} requests...", .{i});
+            log.info("Completed {d} requests...\n", .{i});
         }
     }
 
@@ -231,17 +238,17 @@ fn percentile(sorted_values: []const f64, p: u8) f64 {
 }
 
 fn printBenchmarkResult(name: []const u8, result: BenchmarkResult) void {
-    std.log.info("--- {} ---", .{name});
-    std.log.info("Requests/sec:    {d:.2}", .{result.requests_per_second});
-    std.log.info("Avg latency:     {d:.3}ms", .{result.avg_latency_ms});
-    std.log.info("50th percentile: {d:.3}ms", .{result.p50_latency_ms});
-    std.log.info("95th percentile: {d:.3}ms", .{result.p95_latency_ms});
-    std.log.info("99th percentile: {d:.3}ms", .{result.p99_latency_ms});
-    std.log.info("Total time:      {d:.2}ms", .{result.total_time_ms});
+    log.info("--- {s} ---\n", .{name});
+    log.info("Requests/sec:    {d:.2}\n", .{result.requests_per_second});
+    log.info("Avg latency:     {d:.3}ms\n", .{result.avg_latency_ms});
+    log.info("50th percentile: {d:.3}ms\n", .{result.p50_latency_ms});
+    log.info("95th percentile: {d:.3}ms\n", .{result.p95_latency_ms});
+    log.info("99th percentile: {d:.3}ms\n", .{result.p99_latency_ms});
+    log.info("Total time:      {d:.2}ms\n", .{result.total_time_ms});
 }
 
 fn benchmarkMemoryUsage(allocator: std.mem.Allocator, config: BenchmarkConfig) !void {
-    std.log.info("--- Memory Usage Benchmark ---", .{});
+    log.info("--- Memory Usage Benchmark ---\n", .{});
 
     var app = h3z.createApp(allocator, .{});
     defer app.deinit();
@@ -271,16 +278,16 @@ fn benchmarkMemoryUsage(allocator: std.mem.Allocator, config: BenchmarkConfig) !
 
         if (i % 1000 == 0) {
             const current_memory = getCurrentMemoryUsage();
-            std.log.info("After {} requests: {d:.2}MB", .{ i, @as(f64, @floatFromInt(current_memory)) / 1024.0 / 1024.0 });
+            log.info("After {d} requests: {d:.2}MB\n", .{ i, @as(f64, @floatFromInt(current_memory)) / 1024.0 / 1024.0 });
         }
     }
 
     const final_memory = getCurrentMemoryUsage();
     const memory_growth = final_memory - initial_memory;
 
-    std.log.info("Initial memory:  {d:.2}MB", .{@as(f64, @floatFromInt(initial_memory)) / 1024.0 / 1024.0});
-    std.log.info("Final memory:    {d:.2}MB", .{@as(f64, @floatFromInt(final_memory)) / 1024.0 / 1024.0});
-    std.log.info("Memory growth:   {d:.2}MB", .{@as(f64, @floatFromInt(memory_growth)) / 1024.0 / 1024.0});
+    log.info("Initial memory:  {d:.2}MB\n", .{@as(f64, @floatFromInt(initial_memory)) / 1024.0 / 1024.0});
+    log.info("Final memory:    {d:.2}MB\n", .{@as(f64, @floatFromInt(final_memory)) / 1024.0 / 1024.0});
+    log.info("Memory growth:   {d:.2}MB\n", .{@as(f64, @floatFromInt(memory_growth)) / 1024.0 / 1024.0});
 }
 
 fn getCurrentMemoryUsage() usize {
@@ -292,7 +299,7 @@ fn getCurrentMemoryUsage() usize {
 
 // Stress test with high concurrency
 fn stressTest(allocator: std.mem.Allocator) !void {
-    std.log.info("\n--- Stress Test ---", .{});
+    log.info("\n--- Stress Test ---\n", .{});
 
     var app = h3z.createApp(allocator, .{});
     defer app.deinit();
@@ -327,7 +334,7 @@ fn stressTest(allocator: std.mem.Allocator) !void {
             const elapsed = std.time.nanoTimestamp() - start_time;
             const elapsed_sec = @as(f64, @floatFromInt(elapsed)) / 1_000_000_000.0;
             const current_rps = @as(f64, @floatFromInt(i)) / elapsed_sec;
-            std.log.info("Stress test: {} requests, {d:.0} req/s", .{ i, current_rps });
+            log.info("Stress test: {d} requests, {d:.0} req/s\n", .{ i, current_rps });
         }
     }
 
@@ -335,5 +342,5 @@ fn stressTest(allocator: std.mem.Allocator) !void {
     const total_time = @as(f64, @floatFromInt(end_time - start_time)) / 1_000_000_000.0;
     const final_rps = @as(f64, @floatFromInt(num_requests)) / total_time;
 
-    std.log.info("Stress test completed: {d:.0} req/s over {d:.2}s", .{ final_rps, total_time });
+    log.info("Stress test completed: {d:.0} req/s over {d:.2}s\n", .{ final_rps, total_time });
 }

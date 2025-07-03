@@ -1,11 +1,11 @@
 const std = @import("std");
 const StatusCode = @import("status.zig").StatusCode;
-const Headers = @import("request.zig").Headers;
+const headers = @import("headers.zig");
 
 /// HTTP response builder
 pub const Response = struct {
     status: StatusCode,
-    headers: Headers,
+    headers: headers.Headers,
     body: ?[]const u8,
     allocator: std.mem.Allocator,
     _body_owned: bool, // Track if we own the body memory
@@ -14,7 +14,7 @@ pub const Response = struct {
     pub fn init(allocator: std.mem.Allocator) Response {
         return Response{
             .status = .ok,
-            .headers = Headers.init(allocator),
+            .headers = headers.Headers.init(allocator),
             .body = null,
             .allocator = allocator,
             ._body_owned = false,
@@ -23,12 +23,6 @@ pub const Response = struct {
 
     /// Clean up response resources
     pub fn deinit(self: *Response) void {
-        // Free headers
-        var iter = self.headers.iterator();
-        while (iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
         self.headers.deinit();
 
         // Free body if we own it
@@ -43,32 +37,26 @@ pub const Response = struct {
         return self;
     }
 
-    /// Set a response header
+    /// Set a response header (replaces any existing values)
     pub fn setHeader(self: *Response, name: []const u8, value: []const u8) !*Response {
-        const name_copy = try self.allocator.dupe(u8, name);
-        const value_copy = try self.allocator.dupe(u8, value);
-
-        // If header already exists, free the old value
-        if (self.headers.get(name_copy)) |old_value| {
-            self.allocator.free(old_value);
-        }
-
-        try self.headers.put(name_copy, value_copy);
+        try self.headers.set(name, value);
         return self;
     }
 
-    /// Remove a response header
-    pub fn removeHeader(self: *Response, name: []const u8) *Response {
-        if (self.headers.fetchRemove(name)) |kv| {
-            self.allocator.free(kv.key);
-            self.allocator.free(kv.value);
-        }
-        return self;
+    /// Remove a response header (case-insensitive)
+    pub fn removeHeader(self: *Response, name: []const u8) void {
+        self.headers.remove(name);
     }
 
-    /// Get a response header value
+    /// Get a response header value (case-insensitive)
     pub fn getHeader(self: *const Response, name: []const u8) ?[]const u8 {
         return self.headers.get(name);
+    }
+
+    /// Get all values for a header (case-insensitive)
+    /// Caller must free the returned slice with allocator.free()
+    pub fn getHeaderAll(self: *const Response, name: []const u8) ![]const []const u8 {
+        return self.headers.getAll(name);
     }
 
     /// Set response body as text
@@ -225,6 +213,7 @@ pub const Response = struct {
         if (self.body) |body| {
             const length_str = try std.fmt.allocPrint(self.allocator, "{d}", .{body.len});
             _ = try self.setHeader("Content-Length", length_str);
+            defer self.allocator.free(length_str);
         }
     }
 
@@ -317,12 +306,31 @@ test "response builder" {
     var response = Response.init(allocator);
     defer response.deinit();
 
+    // Test status setting
     _ = response.setStatus(.created);
+
+    // Test header operations
     _ = try response.setHeader("X-Custom", "test");
+    try testing.expectEqualStrings("test", response.getHeader("x-custom").?);
+
+    // Test setting a different value for the same header
+    _ = try response.setHeader("X-Custom", "new-value");
+    try testing.expectEqualStrings("new-value", response.getHeader("x-custom").?);
+
+    // Test getting all values (should only have one since we replaced it)
+    const values = try response.getHeaderAll("x-custom");
+    defer allocator.free(values);
+    try testing.expectEqual(@as(usize, 1), values.len);
+    try testing.expectEqualStrings("new-value", values[0]);
+
+    // Test removing header
+    response.removeHeader("x-custom");
+    try testing.expect(response.getHeader("x-custom") == null);
+
+    // Test JSON response
     _ = try response.json(.{ .message = "success", .id = 123 });
 
     try testing.expect(response.status == .created);
-    try testing.expectEqualStrings("test", response.getHeader("X-Custom").?);
     try testing.expect(response.body != null);
     try testing.expect(std.mem.indexOf(u8, response.body.?, "success") != null);
 }

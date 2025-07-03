@@ -194,16 +194,112 @@ pub fn getFilename(path: []const u8) []const u8 {
 
 /// Check if path is safe (doesn't contain .. or other dangerous patterns)
 pub fn isSafePath(path: []const u8) bool {
-    // Check for dangerous patterns
-    if (std.mem.indexOf(u8, path, "..") != null) return false;
-    if (std.mem.indexOf(u8, path, "//") != null) return false;
-    if (std.mem.startsWith(u8, path, "/..")) return false;
-    if (std.mem.endsWith(u8, path, "/..")) return false;
+    return isSafePathAlloc(std.heap.page_allocator, path) catch false;
+}
 
-    // Check for null bytes
-    if (std.mem.indexOf(u8, path, "\x00") != null) return false;
+/// Check if path is safe with custom allocator for URL decoding
+pub fn isSafePathAlloc(allocator: std.mem.Allocator, path: []const u8) !bool {
+    // First decode URL encoding to prevent bypasses like %2e%2e
+    const decoded_path = try decodeUrl(allocator, path);
+    defer allocator.free(decoded_path);
+
+    // Check for dangerous patterns in decoded path
+    if (std.mem.indexOf(u8, decoded_path, "..") != null) return false;
+    if (std.mem.indexOf(u8, decoded_path, "//") != null) return false;
+    if (std.mem.startsWith(u8, decoded_path, "/..")) return false;
+    if (std.mem.endsWith(u8, decoded_path, "/..")) return false;
+
+    // Check for null bytes and control characters
+    if (std.mem.indexOf(u8, decoded_path, "\x00") != null) return false;
+    for (decoded_path) |c| {
+        if (c < 0x20 and c != '\t' and c != '\n' and c != '\r') return false;
+    }
+
+    // Check for Windows-style path traversal
+    if (std.mem.indexOf(u8, decoded_path, "\\..") != null) return false;
+    if (std.mem.indexOf(u8, decoded_path, "..\\") != null) return false;
+
+    // Check for common encoded variations
+    if (std.mem.indexOf(u8, path, "%2e%2e") != null) return false;
+    if (std.mem.indexOf(u8, path, "%2E%2E") != null) return false;
+    if (std.mem.indexOf(u8, path, "..%2f") != null) return false;
+    if (std.mem.indexOf(u8, path, "..%2F") != null) return false;
+
+    // Normalize path and check again
+    return try isNormalizedPathSafe(allocator, decoded_path);
+}
+
+/// Check if a normalized path is safe
+fn isNormalizedPathSafe(allocator: std.mem.Allocator, path: []const u8) !bool {
+    // Split path into segments and check each one
+    var segments = std.ArrayList([]const u8).init(allocator);
+    defer segments.deinit();
+
+    var iter = std.mem.splitScalar(u8, path, '/');
+    while (iter.next()) |segment| {
+        if (segment.len == 0) continue; // Skip empty segments
+
+        if (std.mem.eql(u8, segment, ".")) {
+            // Current directory reference, skip
+            continue;
+        } else if (std.mem.eql(u8, segment, "..")) {
+            // Parent directory reference
+            if (segments.items.len == 0) {
+                // Trying to go above root
+                return false;
+            }
+            _ = segments.pop();
+        } else {
+            try segments.append(segment);
+        }
+    }
+
+    // Check if any remaining segment contains dangerous patterns
+    for (segments.items) |segment| {
+        if (std.mem.indexOf(u8, segment, "..") != null) return false;
+
+        // Check for Windows reserved names
+        const reserved_names = [_][]const u8{
+            "CON",  "PRN",  "AUX",  "NUL",
+            "COM1", "COM2", "COM3", "COM4",
+            "COM5", "COM6", "COM7", "COM8",
+            "COM9", "LPT1", "LPT2", "LPT3",
+            "LPT4", "LPT5", "LPT6", "LPT7",
+            "LPT8", "LPT9",
+        };
+
+        for (reserved_names) |reserved| {
+            if (std.ascii.eqlIgnoreCase(segment, reserved)) return false;
+        }
+    }
 
     return true;
+}
+
+/// Simple URL decoding function
+fn decodeUrl(allocator: std.mem.Allocator, encoded: []const u8) ![]u8 {
+    var decoded = std.ArrayList(u8).init(allocator);
+    defer decoded.deinit();
+
+    var i: usize = 0;
+    while (i < encoded.len) {
+        if (encoded[i] == '%' and i + 2 < encoded.len) {
+            const hex_str = encoded[i + 1 .. i + 3];
+            const byte_val = std.fmt.parseInt(u8, hex_str, 16) catch {
+                // Invalid hex, keep the original
+                try decoded.append(encoded[i]);
+                i += 1;
+                continue;
+            };
+            try decoded.append(byte_val);
+            i += 3;
+        } else {
+            try decoded.append(encoded[i]);
+            i += 1;
+        }
+    }
+
+    return decoded.toOwnedSlice();
 }
 
 /// Build absolute URL from base URL and relative path

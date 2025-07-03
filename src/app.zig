@@ -2,10 +2,17 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const Router = @import("router.zig").Router;
 const Handler = @import("router.zig").Handler;
+const RouteGroup = @import("router.zig").RouteGroup;
 const Middleware = @import("middleware.zig").Middleware;
 const Request = @import("http/request.zig");
+const HttpMethod = @import("http/request.zig").HttpMethod;
 const Response = @import("http/response.zig").Response;
 const parseRequest = @import("http/request.zig").parseRequest;
+const RateLimiter = @import("middleware.zig").rateLimit.RateLimiter;
+const BufferPool = @import("memory/buffer_pool.zig").BufferPool;
+const BufferSize = @import("memory/buffer_pool.zig").BufferSize;
+const cors = @import("middleware.zig").cors;
+const rateLimit = @import("middleware.zig").rateLimit;
 
 /// Application configuration
 pub const AppConfig = struct {
@@ -136,6 +143,8 @@ pub const App = struct {
     _server: ?std.net.Server = null,
     _connection_pool: ?ConnectionPool = null,
     _shutdown: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    _rate_limiter: ?RateLimiter = null,
+    _buffer_pool: ?BufferPool = null,
 
     /// Initialize a new application
     pub fn init(allocator: std.mem.Allocator, config: AppConfig) App {
@@ -156,6 +165,18 @@ pub const App = struct {
         if (self._connection_pool) |*pool| {
             pool.deinit();
         }
+
+        if (self._rate_limiter) |*limiter| {
+            limiter.deinit();
+        }
+
+        // Clean up buffer pool
+        if (self._buffer_pool) |*pool| {
+            pool.deinit();
+        }
+
+        // Clean up global rate limiter if any middleware was using it
+        rateLimit.deinitGlobal();
 
         self.router.deinit();
     }
@@ -201,7 +222,7 @@ pub const App = struct {
     }
 
     /// Create a route group
-    pub fn group(self: *App, prefix: []const u8) !*@import("router.zig").RouteGroup {
+    pub fn group(self: *App, prefix: []const u8) !*RouteGroup {
         return self.router.group(prefix);
     }
 
@@ -217,7 +238,13 @@ pub const App = struct {
         // Initialize connection pool
         self._connection_pool = ConnectionPool.init(self.allocator, self.config.max_connections);
 
-        std.log.info("H3Z server listening on {s}:{d}", .{ self.config.host, self.config.port });
+        // Initialize buffer pool
+        self._buffer_pool = BufferPool.init(self.allocator, .{
+            .max_buffers_per_size = 16,
+        });
+
+        std.log.info("H3Z server listening on {s}:{d} (synchronous mode)", .{ self.config.host, self.config.port });
+
         std.log.info("Configuration: max_connections={d}, buffer_size={d}", .{ self.config.max_connections, self.config.buffer_size });
 
         // Main server loop
@@ -248,7 +275,6 @@ pub const App = struct {
             self.stats.errorOccurred();
             std.log.err("Error handling connection: {}", .{err});
         };
-
         self.stats.connectionFinished();
     }
 
@@ -279,9 +305,26 @@ pub const App = struct {
         self.stats.requestStarted();
         defer self.stats.requestFinished();
 
-        // Read request data
-        var buffer = try self.allocator.alloc(u8, self.config.buffer_size);
-        defer self.allocator.free(buffer);
+        // Get buffer from pool if available, otherwise allocate
+        var managed_buffer = if (self._buffer_pool) |*pool|
+            pool.acquire(BufferSize.fromSize(self.config.buffer_size)) catch null
+        else
+            null;
+
+        const buffer = if (managed_buffer) |*mb|
+            mb.data
+        else
+            try self.allocator.alloc(u8, self.config.buffer_size);
+
+        defer {
+            if (managed_buffer) |*mb| {
+                if (self._buffer_pool) |*pool| {
+                    pool.release(mb);
+                }
+            } else {
+                self.allocator.free(buffer);
+            }
+        }
 
         // Simple blocking read - this should work for most cases
         const bytes_read = connection.stream.read(buffer) catch |err| {
@@ -368,7 +411,7 @@ pub const App = struct {
         // Headers
         var header_iter = response.headers.iterator();
         while (header_iter.next()) |entry| {
-            const header_line = try std.fmt.allocPrint(response.allocator, "{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
+            const header_line = try std.fmt.allocPrint(response.allocator, "{s}: {s}\r\n", .{ entry.key, entry.value });
             defer response.allocator.free(header_line);
 
             try writer.writeAll(header_line);
@@ -427,10 +470,20 @@ pub const App = struct {
     }
 
     /// Handle requests in a test environment
-    pub fn testRequest(self: *App, method: @import("http/request.zig").HttpMethod, path: []const u8, body: ?[]const u8) !Response {
+    pub fn testRequest(self: *App, method: HttpMethod, path: []const u8, body: ?[]const u8) !Response {
         var request = Request.Request.init(self.allocator);
         request.method = method;
-        request.uri = try std.Uri.parse(path);
+        // Create a minimal URI for testing - just store the path
+        request.uri = std.Uri{
+            .scheme = "http",
+            .user = null,
+            .password = null,
+            .host = .{ .raw = "localhost" },
+            .port = null,
+            .path = .{ .raw = path },
+            .query = null,
+            .fragment = null,
+        };
         request.body = if (body) |b| try self.allocator.dupe(u8, b) else null;
         defer request.deinit();
 
@@ -446,7 +499,7 @@ pub const App = struct {
         // Copy headers
         var header_iter = ctx.response.headers.iterator();
         while (header_iter.next()) |entry| {
-            _ = try response.setHeader(entry.key_ptr.*, entry.value_ptr.*);
+            _ = try response.setHeader(entry.key, entry.value);
         }
 
         // Copy body
@@ -456,6 +509,14 @@ pub const App = struct {
         }
 
         return response;
+    }
+
+    /// Get or initialize rate limiter
+    pub fn getRateLimiter(self: *App) !*RateLimiter {
+        if (self._rate_limiter == null) {
+            self._rate_limiter = RateLimiter.init(self.allocator);
+        }
+        return &self._rate_limiter.?;
     }
 };
 
@@ -494,7 +555,7 @@ test "app middleware" {
     defer app.deinit();
 
     // Add CORS middleware
-    try app.use(@import("middleware.zig").cors.default());
+    try app.use(cors.default());
 
     const TestHandler = struct {
         fn handle(ctx: *Context) !void {

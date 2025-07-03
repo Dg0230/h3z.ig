@@ -1,12 +1,17 @@
 const std = @import("std");
 const Request = @import("http/request.zig").Request;
 const Response = @import("http/response.zig").Response;
+const ArenaManager = @import("memory/smart_ptr.zig").ArenaManager;
+const StringMap = @import("http/string_map.zig").StringMap;
+const StatusCode = @import("http/status.zig").StatusCode;
+const HttpMethod = @import("http/request.zig").HttpMethod;
+const CookieOptions = @import("http/response.zig").CookieOptions;
 
 /// Route parameters map
-pub const RouteParams = std.StringHashMap([]const u8);
+pub const RouteParams = StringMap("RouteParams");
 
 /// Locals storage for middleware communication
-pub const Locals = std.StringHashMap([]const u8);
+pub const Locals = StringMap("Locals");
 
 /// HTTP request context containing request, response, and metadata
 pub const Context = struct {
@@ -16,41 +21,83 @@ pub const Context = struct {
     locals: Locals,
     allocator: std.mem.Allocator,
 
+    // Memory management
+    arena: ArenaManager,
+    _owns_arena: bool,
+
     // Internal state
     _aborted: bool = false,
     _start_time: i64,
 
-    /// Initialize a new context
+    /// Initialize a new context (temporarily without arena for debugging)
     pub fn init(allocator: std.mem.Allocator, request: Request) Context {
+        // Temporarily bypass arena for debugging
         return Context{
             .request = request,
             .response = Response.init(allocator),
             .params = RouteParams.init(allocator),
             .locals = Locals.init(allocator),
             .allocator = allocator,
+            .arena = ArenaManager.init(allocator),
+            ._owns_arena = false,
+            ._start_time = std.time.milliTimestamp(),
+        };
+    }
+
+    /// Initialize context with existing arena (for reuse)
+    pub fn initWithArena(arena: *ArenaManager, request: Request) Context {
+        const arena_allocator = arena.allocator();
+
+        return Context{
+            .request = request,
+            .response = Response.init(arena_allocator),
+            .params = RouteParams.init(arena_allocator),
+            .locals = Locals.init(arena_allocator),
+            .allocator = arena_allocator,
+            .arena = arena.*,
+            ._owns_arena = false,
             ._start_time = std.time.milliTimestamp(),
         };
     }
 
     /// Clean up context resources
+    /// Note: Does not deinit the request - caller is responsible for request lifetime
     pub fn deinit(self: *Context) void {
+        // Note: We don't clean up request here as it's owned by the caller
+
+        // Clean up response
         self.response.deinit();
 
-        // Free route params
-        var params_iter = self.params.iterator();
-        while (params_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
+        // Clean up params and locals (StringHashMap will free its own memory)
+        // Note: We don't free the keys/values here because they were allocated with the arena
         self.params.deinit();
-
-        // Free locals
-        var locals_iter = self.locals.iterator();
-        while (locals_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
-        }
         self.locals.deinit();
+
+        // Clean up arena if we own it
+        if (self._owns_arena) {
+            self.arena.deinit();
+        }
+    }
+
+    /// Reset context for reuse (keeps arena allocated)
+    pub fn reset(self: *Context, request: Request) void {
+        // Clean up existing data
+        self.response.deinit();
+        self.params.deinit();
+        self.locals.deinit();
+
+        // Reset arena but retain capacity
+        self.arena.reset();
+        const arena_allocator = self.arena.allocator();
+
+        // Reinitialize with new request
+        self.request = request;
+        self.response = Response.init(arena_allocator);
+        self.params = RouteParams.init(arena_allocator);
+        self.locals = Locals.init(arena_allocator);
+        self.allocator = arena_allocator;
+        self._aborted = false;
+        self._start_time = std.time.milliTimestamp();
     }
 
     /// Get route parameter value
@@ -60,9 +107,12 @@ pub const Context = struct {
 
     /// Set route parameter (used internally by router)
     pub fn setParam(self: *Context, name: []const u8, value: []const u8) !void {
-        const name_copy = try self.allocator.dupe(u8, name);
-        const value_copy = try self.allocator.dupe(u8, value);
-        try self.params.put(name_copy, value_copy);
+        try self.params.putOwned(name, value);
+    }
+
+    /// Set parameter without copying (for string literals or persistent data)
+    pub fn setParamNoCopy(self: *Context, name: []const u8, value: []const u8) !void {
+        try self.params.putBorrowed(name, value);
     }
 
     /// Get local value (for middleware communication)
@@ -72,9 +122,17 @@ pub const Context = struct {
 
     /// Set local value (for middleware communication)
     pub fn setLocal(self: *Context, name: []const u8, value: []const u8) !void {
-        const name_copy = try self.allocator.dupe(u8, name);
-        const value_copy = try self.allocator.dupe(u8, value);
-        try self.locals.put(name_copy, value_copy);
+        try self.locals.putOwned(name, value);
+    }
+
+    /// Set local without copying (for string literals or persistent data)
+    pub fn setLocalNoCopy(self: *Context, name: []const u8, value: []const u8) !void {
+        try self.locals.putBorrowed(name, value);
+    }
+
+    /// Get memory usage statistics
+    pub fn memoryUsage(self: *const Context) usize {
+        return self.arena.bytesAllocated();
     }
 
     /// Get query parameter value
@@ -98,7 +156,7 @@ pub const Context = struct {
     }
 
     /// Set response status
-    pub fn status(self: *Context, code: @import("http/status.zig").StatusCode) void {
+    pub fn status(self: *Context, code: StatusCode) void {
         _ = self.response.setStatus(code);
     }
 
@@ -123,17 +181,17 @@ pub const Context = struct {
     }
 
     /// Redirect to URL
-    pub fn redirect(self: *Context, redirect_url: []const u8, status_code: ?@import("http/status.zig").StatusCode) !void {
+    pub fn redirect(self: *Context, redirect_url: []const u8, status_code: ?StatusCode) !void {
         _ = try self.response.redirect(redirect_url, status_code);
     }
 
     /// Set cookie
-    pub fn setCookie(self: *Context, name: []const u8, value: []const u8, options: @import("http/response.zig").CookieOptions) !void {
+    pub fn setCookie(self: *Context, name: []const u8, value: []const u8, options: CookieOptions) !void {
         _ = try self.response.setCookie(name, value, options);
     }
 
     /// Clear cookie
-    pub fn clearCookie(self: *Context, name: []const u8, options: @import("http/response.zig").CookieOptions) !void {
+    pub fn clearCookie(self: *Context, name: []const u8, options: CookieOptions) !void {
         _ = try self.response.clearCookie(name, options);
     }
 
@@ -236,7 +294,7 @@ pub const Context = struct {
     }
 
     /// Get request method
-    pub fn method(self: *const Context) @import("http/request.zig").HttpMethod {
+    pub fn method(self: *const Context) HttpMethod {
         return self.request.method;
     }
 
@@ -251,17 +309,17 @@ pub const Context = struct {
     /// Get request URL (path + query)
     pub fn url(self: *const Context) []const u8 {
         // TODO: Implement proper URL reconstruction
-        return self.request.uri.path;
+        return self.path();
     }
 
     /// Check if request method matches
-    pub fn isMethod(self: *const Context, check_method: @import("http/request.zig").HttpMethod) bool {
+    pub fn isMethod(self: *const Context, check_method: HttpMethod) bool {
         return self.request.method == check_method;
     }
 
     /// Check if request path matches pattern
     pub fn isPath(self: *const Context, pattern: []const u8) bool {
-        return std.mem.eql(u8, self.request.uri.path, pattern);
+        return std.mem.eql(u8, self.path(), pattern);
     }
 
     /// Check if this is a GET request
@@ -301,15 +359,15 @@ pub const Context = struct {
 
     /// Log request information
     pub fn log(self: *const Context, comptime level: std.log.Level, comptime format: []const u8, args: anytype) void {
-        const method_str = self.request.method.toString();
-        const path_str = self.request.uri.path;
+        const method_str = @tagName(self.request.method);
+        const path_str = self.path();
         const processing_time = self.processingTime();
 
         std.log.scoped(.h3z).log(level, "[{s} {s}] " ++ format ++ " ({d}ms)", .{ method_str, path_str } ++ args ++ .{processing_time});
     }
 };
 
-test "context operations" {
+test "context basic operations" {
     const testing = std.testing;
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -329,7 +387,37 @@ test "context operations" {
     try ctx.setLocal("user", "john");
     try testing.expectEqualStrings("john", ctx.local("user").?);
 
+    // Test no-copy methods
+    try ctx.setParamNoCopy("static", "value");
+    try testing.expectEqualStrings("value", ctx.param("static").?);
+
     // Test convenience methods
     try testing.expect(ctx.isGet());
     try testing.expect(!ctx.isPost());
+}
+
+test "context reset functionality" {
+    const testing = std.testing;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // Create first request (will be owned by context)
+    const request1 = Request.init(allocator);
+    var ctx = Context.init(allocator, request1);
+    defer ctx.deinit();
+
+    // Add some data
+    try ctx.setParam("id", "123");
+    try ctx.setLocal("user", "alice");
+
+    // Create second request (will be owned by context after reset)
+    const request2 = Request.init(allocator);
+
+    // Reset with new request (takes ownership of request2)
+    ctx.reset(request2);
+
+    // Old data should be gone
+    try testing.expect(ctx.param("id") == null);
+    try testing.expect(ctx.local("user") == null);
 }

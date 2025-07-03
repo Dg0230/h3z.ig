@@ -8,9 +8,8 @@ pub const JsonError = error{
 };
 
 /// Parse JSON string to a specific type
-pub fn parse(comptime T: type, allocator: std.mem.Allocator, json_str: []const u8) !T {
-    const parsed = try std.json.parseFromSlice(T, allocator, json_str, .{});
-    return parsed.value;
+pub fn parse(comptime T: type, allocator: std.mem.Allocator, json_str: []const u8) !std.json.Parsed(T) {
+    return std.json.parseFromSlice(T, allocator, json_str, .{});
 }
 
 /// Stringify a value to JSON
@@ -31,8 +30,9 @@ pub fn prettyStringify(value: anytype, allocator: std.mem.Allocator) ![]u8 {
 }
 
 /// Validate JSON string
-pub fn validate(json_str: []const u8) bool {
-    var stream = std.json.Scanner.initCompleteInput(std.heap.page_allocator, json_str);
+pub fn validate(allocator: std.mem.Allocator, json_str: []const u8) bool {
+    var stream = std.json.Scanner.initCompleteInput(allocator, json_str);
+    defer stream.deinit();
     while (true) {
         const token = stream.next() catch return false;
         if (token == .end_of_document) break;
@@ -158,11 +158,11 @@ test "json utilities" {
     // Test parse
     const TestData = struct { name: []const u8, age: i32 };
     const json_str = "{\"name\":\"John\",\"age\":30}";
-    const parsed = try parse(TestData, allocator, json_str);
-    defer allocator.free(parsed.name);
+    var parsed = try parse(TestData, allocator, json_str);
+    defer parsed.deinit();
 
-    try testing.expectEqualStrings("John", parsed.name);
-    try testing.expect(parsed.age == 30);
+    try testing.expectEqualStrings("John", parsed.value.name);
+    try testing.expect(parsed.value.age == 30);
 
     // Test stringify
     const data = TestData{ .name = "Jane", .age = 25 };
@@ -173,6 +173,6 @@ test "json utilities" {
     try testing.expect(std.mem.indexOf(u8, json_result, "25") != null);
 
     // Test validation
-    try testing.expect(validate("{\"valid\":true}"));
-    try testing.expect(!validate("{invalid"));
+    try testing.expect(validate(allocator, "{\"valid\":true}"));
+    try testing.expect(!validate(allocator, "{invalid"));
 }

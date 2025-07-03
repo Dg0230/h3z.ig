@@ -32,7 +32,9 @@ pub const AppConfig = @import("app.zig").AppConfig;
 
 // Handler types
 pub const Handler = @import("router.zig").Handler;
-pub const NextFn = @import("middleware.zig").NextFn;
+pub const HandlerFn = @import("middleware.zig").HandlerFn;
+pub const MiddlewareFn = @import("middleware.zig").MiddlewareFn;
+pub const MiddlewareResult = @import("middleware.zig").MiddlewareResult;
 
 // Convenience function to create a new app
 pub fn createApp(allocator: std.mem.Allocator, config: AppConfig) App {

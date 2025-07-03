@@ -2,6 +2,7 @@ const std = @import("std");
 const Context = @import("context.zig").Context;
 const Middleware = @import("middleware.zig").Middleware;
 const HttpMethod = @import("http/request.zig").HttpMethod;
+const Request = @import("http/request.zig").Request;
 
 /// Route handler function type
 pub const Handler = *const fn (ctx: *Context) anyerror!void;
@@ -78,10 +79,25 @@ pub const RouteMatcher = struct {
     fn matchPattern(self: *const RouteMatcher, path: []const u8) ?RouteParams {
         var params = RouteParams.init(self.allocator);
 
+        // Special case: exact match for root path
+        if (std.mem.eql(u8, self.pattern, "/")) {
+            if (std.mem.eql(u8, path, "/")) {
+                return params;
+            } else {
+                params.deinit();
+                return null;
+            }
+        }
+
+        // For non-root patterns, use segment-based matching
         var pattern_segments = std.mem.splitScalar(u8, self.pattern, '/');
         var path_segments = std.mem.splitScalar(u8, path, '/');
 
         var param_index: usize = 0;
+
+        // Skip the first empty segment (before the leading '/')
+        _ = pattern_segments.next();
+        _ = path_segments.next();
 
         while (pattern_segments.next()) |pattern_seg| {
             const path_seg = path_segments.next() orelse {
@@ -377,12 +393,20 @@ pub const Router = struct {
         // Simple sequential middleware execution for now
         // Execute all middlewares first
         for (middlewares) |middleware| {
-            // Simple dummy next function that does nothing
-            const dummy_next = struct {
-                fn call(_: *Context) !void {}
-            }.call;
-
-            try middleware.handler(ctx, dummy_next);
+            const result = try middleware.handler(ctx);
+            switch (result) {
+                .continue_chain => {
+                    // Continue to next middleware or handler
+                },
+                .halt => {
+                    // Stop processing, response should be set
+                    return;
+                },
+                .abort => {
+                    // Abort processing
+                    return;
+                },
+            }
         }
 
         // Then execute the final handler
@@ -475,7 +499,7 @@ test "router basic functionality" {
 
     try router.get("/", TestHandler.handle);
 
-    var request = @import("http/request.zig").Request.init(allocator);
+    var request = Request.init(allocator);
     request.method = .GET;
     request.uri.path = .{ .raw = "/" };
     defer request.deinit();
